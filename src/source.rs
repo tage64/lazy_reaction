@@ -9,6 +9,8 @@ pub trait Source<T> {
     fn get(&self) -> Option<T>;
 
     fn get_existing(&self) -> T;
+
+    fn reset(&self);
 }
 
 impl<'a, T, S: Source<T>> Source<T> for &'a S {
@@ -20,6 +22,11 @@ impl<'a, T, S: Source<T>> Source<T> for &'a S {
     #[inline(always)]
     fn get_existing(&self) -> T {
         (*self).get_existing()
+    }
+
+    #[inline(always)]
+    fn reset(&self) {
+        (*self).reset()
     }
 }
 
@@ -42,6 +49,12 @@ where
     fn get_existing(&self) -> (T1, T2) {
         (self.0.get_existing(), self.1.get_existing())
     }
+
+    #[inline]
+    fn reset(&self) {
+        self.0.reset();
+        self.1.reset();
+    }
 }
 
 impl<S1, S2, S3, T1, T2, T3> Source<(T1, T2, T3)> for (S1, S2, S3)
@@ -59,6 +72,12 @@ where
     fn get_existing(&self) -> (T1, T2, T3) {
         let ((x1, x2), x3) = ((&self.0, &self.1), &self.2).get_existing();
         (x1, x2, x3)
+    }
+
+    fn reset(&self) {
+        self.0.reset();
+        self.1.reset();
+        self.2.reset();
     }
 }
 
@@ -78,6 +97,13 @@ where
     fn get_existing(&self) -> (T1, T2, T3, T4) {
         let ((x1, x2), (x3, x4)) = ((&self.0, &self.1), (&self.2, &self.3)).get_existing();
         (x1, x2, x3, x4)
+    }
+
+    fn reset(&self) {
+        self.0.reset();
+        self.1.reset();
+        self.2.reset();
+        self.3.reset();
     }
 }
 
@@ -99,6 +125,14 @@ where
         let (((x1, x2), x3), (x4, x5)) =
             (((&self.0, &self.1), &self.2), (&self.3, &self.4)).get_existing();
         (x1, x2, x3, x4, x5)
+    }
+
+    fn reset(&self) {
+        self.0.reset();
+        self.1.reset();
+        self.2.reset();
+        self.3.reset();
+        self.4.reset();
     }
 }
 
@@ -125,11 +159,17 @@ where
     fn get_existing(&self) -> [T; N] {
         self.each_ref().map(Source::get_existing)
     }
+
+    fn reset(&self) {
+        for source in self.iter() {
+            source.reset();
+        }
+    }
 }
 
 impl<S, T> Source<Vec<T>> for [S]
 where
-    S: Source<T>,
+    S: Source<T> + Clone,
 {
     fn get(&self) -> Option<Vec<T>> {
         let mut found_updated = false;
@@ -157,5 +197,11 @@ where
 
     fn get_existing(&self) -> Vec<T> {
         self.iter().map(Source::get_existing).collect()
+    }
+
+    fn reset(&self) {
+        for source in self.iter() {
+            source.reset();
+        }
     }
 }
