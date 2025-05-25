@@ -1,0 +1,7 @@
+[package]
+name = "lazy_reaction"
+version = "0.1.0"
+authors = ["Tage Johansson"]
+edition = "2024"
+
+[dependencies]
