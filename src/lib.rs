@@ -112,12 +112,12 @@ impl<T: Clone> Source<T> for ReadSignal<T> {
 struct DerivedSignalInner<T> {
     rgraph: Rc<ReactiveGraph>,
 
-    /// The function to compute a new value. Returns `None` if non of the sources have been
-    /// updated.
-    func: Box<dyn FnMut() -> Option<T>>,
-
     /// The most recently evaluated value.
     last_value: T,
+
+    /// The function to compute a new value. Takes the reference to the `last_value` and returns
+    /// `None` if the value is unchanged.
+    func: Box<dyn FnMut(Option<&T>) -> Option<T>>,
 
     /// The [`ReactiveGraph::generation`] when this was last evaluated.
     rgraph_generation: u64,
@@ -151,10 +151,81 @@ impl ReactiveGraph {
         S: Source<U> + 'static,
         T: Clone,
     {
+        self.derived_signal_with_old_val(source, move |_old_val, x| f(x))
+    }
+
+    /// Like [`derived_signal()`](Self::derived_signal) but the evaluation function gets a reference to the previous
+    /// value as well (except for the first time).
+    pub fn derived_signal_with_old_val<S, U, T>(
+        self: &Rc<Self>,
+        source: S,
+        mut f: impl FnMut(Option<&T>, U) -> T + 'static,
+    ) -> DerivedSignal<T>
+    where
+        S: Source<U> + 'static,
+        T: Clone,
+    {
         DerivedSignal(Rc::new(RefCell::new(DerivedSignalInner {
             rgraph: self.clone(),
-            last_value: f(source.get_existing()),
-            func: Box::new(move || source.get().map(&mut f)),
+            last_value: f(None, source.get_existing()),
+            func: Box::new(move |old_val| source.get().map(|x| f(old_val, x))),
+            rgraph_generation: self.generation.get(),
+        })))
+    }
+
+    /// Create a [`DerivedSignal`] that only propagates a new value if it has changed according
+    /// to the [`PartialEq`] implementation.
+    pub fn memo<S, U, T>(
+        self: &Rc<Self>,
+        source: S,
+        mut f: impl FnMut(U) -> T + 'static,
+    ) -> DerivedSignal<T>
+    where
+        S: Source<U> + 'static,
+        T: Clone + PartialEq,
+    {
+        self.memo_with_comparator(source, move |_old_val, x| f(x), |lhs, rhs| lhs == rhs)
+    }
+
+    /// Like [`memo()`](Self::memo) but the evaluation function takes a mutable reference to the previous value
+    /// as well (except for the first evaluation).
+    pub fn memo_with_old_val<S, U, T>(
+        self: &Rc<Self>,
+        source: S,
+        mut f: impl FnMut(Option<&T>, U) -> T + 'static,
+    ) -> DerivedSignal<T>
+    where
+        S: Source<U> + 'static,
+        T: Clone + PartialEq,
+    {
+        self.memo_with_comparator(
+            source,
+            move |old_val, x| f(old_val, x),
+            |lhs, rhs| lhs == rhs,
+        )
+    }
+
+    /// Create a [`DerivedSignal`] that only propagate a new value if it has changed according
+    /// to a comparison function.
+    pub fn memo_with_comparator<S, U, T>(
+        self: &Rc<Self>,
+        source: S,
+        mut f: impl FnMut(Option<&T>, U) -> T + 'static,
+        mut is_equal: impl FnMut(&T, &T) -> bool + 'static,
+    ) -> DerivedSignal<T>
+    where
+        S: Source<U> + 'static,
+        T: Clone,
+    {
+        DerivedSignal(Rc::new(RefCell::new(DerivedSignalInner {
+            rgraph: self.clone(),
+            last_value: f(None, source.get_existing()),
+            func: Box::new(move |old_val| {
+                source
+                    .get()
+                    .map(|x| f(old_val, x))
+                    .filter(|val| !is_equal(old_val.expect("last_value should exist"), &val))
+            }),
             rgraph_generation: self.generation.get(),
         })))
     }
@@ -163,6 +234,7 @@ impl ReactiveGraph {
 impl<T: Clone> Source<T> for DerivedSignal<T> {
     fn get(&self) -> Option<T> {
         let mut self_ = self.0.borrow_mut();
+        let self_ = &mut *self_; // To be able to borrow multiple fields simultaneously.
 
         // Check if the derived signal has an older rgraph generation.
         let rgraph_generation = self_.rgraph.generation.get();
@@ -170,7 +242,7 @@ impl<T: Clone> Source<T> for DerivedSignal<T> {
             self_.rgraph_generation = rgraph_generation;
 
             // Fetch the source.
-            if let Some(val) = (self_.func)() {
+            if let Some(val) = (self_.func)(Some(&self_.last_value)) {
                 self_.last_value = val.clone();
                 Some(val)
             } else {
