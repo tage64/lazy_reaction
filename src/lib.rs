@@ -1,6 +1,5 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A graph of signals and some kind of lazy evaluation.
 ///
@@ -8,13 +7,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// in the graph and to signal a tick in the graph.
 pub struct ReactiveGraph {
     /// A value that will be incremented at every reactive step.
-    generation: AtomicU64,
+    generation: Cell<u64>,
 }
 
 impl ReactiveGraph {
     pub fn new() -> Self {
         Self {
-            generation: AtomicU64::new(0),
+            generation: Cell::new(0),
         }
     }
 }
@@ -36,7 +35,7 @@ pub struct ReadSignal<T: Clone> {
     source: WriteSignal<T>,
 
     /// The generation of the value when it was last read.
-    generation: AtomicU64,
+    generation: Cell<u64>,
 }
 
 impl<T> Clone for WriteSignal<T> {
@@ -49,7 +48,7 @@ impl<T: Clone> Clone for ReadSignal<T> {
     fn clone(&self) -> Self {
         Self {
             source: self.source.clone(),
-            generation: AtomicU64::new(self.generation.load(Ordering::Relaxed)),
+            generation: Cell::new(self.generation.get()),
         }
     }
 }
@@ -65,7 +64,7 @@ impl ReactiveGraph {
         })));
         let read_signal = ReadSignal {
             source: write_signal.clone(),
-            generation: AtomicU64::new(0),
+            generation: Cell::new(0),
         };
         (read_signal, write_signal)
     }
@@ -116,24 +115,120 @@ where
     S2: Source<T2>,
     S3: Source<T3>,
 {
-    #[inline]
     fn get(&self) -> Option<(T1, T2, T3)> {
         ((&self.0, &self.1), &self.2)
             .get()
             .map(|((x1, x2), x3)| (x1, x2, x3))
     }
 
-    #[inline]
     fn get_existing(&self) -> (T1, T2, T3) {
         let ((x1, x2), x3) = ((&self.0, &self.1), &self.2).get_existing();
         (x1, x2, x3)
     }
 }
 
+impl<S1, S2, S3, S4, T1, T2, T3, T4> Source<(T1, T2, T3, T4)> for (S1, S2, S3, S4)
+where
+    S1: Source<T1>,
+    S2: Source<T2>,
+    S3: Source<T3>,
+    S4: Source<T4>,
+{
+    fn get(&self) -> Option<(T1, T2, T3, T4)> {
+        ((&self.0, &self.1), (&self.2, &self.3))
+            .get()
+            .map(|((x1, x2), (x3, x4))| (x1, x2, x3, x4))
+    }
+
+    fn get_existing(&self) -> (T1, T2, T3, T4) {
+        let ((x1, x2), (x3, x4)) = ((&self.0, &self.1), (&self.2, &self.3)).get_existing();
+        (x1, x2, x3, x4)
+    }
+}
+
+impl<S1, S2, S3, S4, S5, T1, T2, T3, T4, T5> Source<(T1, T2, T3, T4, T5)> for (S1, S2, S3, S4, S5)
+where
+    S1: Source<T1>,
+    S2: Source<T2>,
+    S3: Source<T3>,
+    S4: Source<T4>,
+    S5: Source<T5>,
+{
+    fn get(&self) -> Option<(T1, T2, T3, T4, T5)> {
+        (((&self.0, &self.1), &self.2), (&self.3, &self.4))
+            .get()
+            .map(|(((x1, x2), x3), (x4, x5))| (x1, x2, x3, x4, x5))
+    }
+
+    fn get_existing(&self) -> (T1, T2, T3, T4, T5) {
+        let (((x1, x2), x3), (x4, x5)) =
+            (((&self.0, &self.1), &self.2), (&self.3, &self.4)).get_existing();
+        (x1, x2, x3, x4, x5)
+    }
+}
+
+impl<S, T, const N: usize> Source<[T; N]> for [S; N]
+where
+    S: Source<T>,
+{
+    fn get(&self) -> Option<[T; N]> {
+        let mut found_updated = false;
+        let vals_and_sources: [(Option<T>, &S); N] = self.each_ref().map(|s| {
+            let val = s.get();
+            if val.is_some() {
+                found_updated = true;
+            }
+            (val, s)
+        });
+        if found_updated {
+            Some(vals_and_sources.map(|(val, s)| val.unwrap_or_else(|| s.get_existing())))
+        } else {
+            None
+        }
+    }
+
+    fn get_existing(&self) -> [T; N] {
+        self.each_ref().map(Source::get_existing)
+    }
+}
+
+impl<S, T> Source<Vec<T>> for [S]
+where
+    S: Source<T>,
+{
+    fn get(&self) -> Option<Vec<T>> {
+        let mut found_updated = false;
+        let vals: Vec<Option<T>> = self
+            .iter()
+            .map(|s| {
+                let val = s.get();
+                if val.is_some() {
+                    found_updated = true;
+                }
+                val
+            })
+            .collect();
+        if found_updated {
+            Some(
+                vals.into_iter()
+                    .enumerate()
+                    .map(|(i, val)| val.unwrap_or_else(|| self[i].get_existing()))
+                    .collect(),
+            )
+        } else {
+            None
+        }
+    }
+
+    fn get_existing(&self) -> Vec<T> {
+        self.iter().map(Source::get_existing).collect()
+    }
+}
+
 impl<T: Clone> Source<T> for ReadSignal<T> {
     fn get(&self) -> Option<T> {
         let source = self.source.0.borrow();
-        let generation = self.generation.swap(source.generation, Ordering::AcqRel);
+        let generation = self.generation.replace(source.generation);
         debug_assert!(generation <= source.generation);
         if generation < source.generation {
             Some(source.value.clone())
@@ -178,7 +273,7 @@ impl ReactiveGraph {
             rgraph: self.clone(),
             last_value: f(source.get_existing()),
             func: Box::new(move || source.get().map(&mut f)),
-            rgraph_generation: self.generation.load(Ordering::Acquire),
+            rgraph_generation: self.generation.get(),
         })))
     }
 }
@@ -188,7 +283,7 @@ impl<T: Clone> Source<T> for DerivedSignal<T> {
         let mut self_ = self.0.borrow_mut();
 
         // Check if the derived signal has an older rgraph generation.
-        let rgraph_generation = self_.rgraph.generation.load(Ordering::Acquire);
+        let rgraph_generation = self_.rgraph.generation.get();
         if self_.rgraph_generation < rgraph_generation {
             self_.rgraph_generation = rgraph_generation;
 
@@ -211,6 +306,6 @@ impl<T: Clone> Source<T> for DerivedSignal<T> {
 
 impl ReactiveGraph {
     pub fn tick(&self) {
-        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.generation.set(self.generation.get() + 1);
     }
 }
