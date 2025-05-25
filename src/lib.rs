@@ -1,3 +1,5 @@
+mod source;
+pub use source::Source;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -16,21 +18,41 @@ impl ReactiveGraph {
             generation: Cell::new(0),
         }
     }
+
+    /// A call to this method propagates updated values through the graph. Call this when you will
+    /// be able to observe the changes of any updated signals since the last tick.
+    pub fn tick(&self) {
+        self.generation.set(self.generation.get() + 1);
+    }
 }
 
 #[derive(Debug)]
 struct WriteSignalInner<T> {
     /// The most recent value.
-    value: T,
+    value: RefCell<T>,
 
     /// A generation that will be incremented every time the value is updated.
-    generation: u64,
+    generation: Cell<u64>,
 }
 
+/// The writing end of a signal.
+///
+/// This is a source to the reactive graph. You can write values to this signal, but the change
+/// will not be propagated through the reactive graph until the
+/// [`tick`-method](ReactiveGraph::tick) has been called. Only the reading end of this signal is
+/// able to observe the changes instantly.
 #[derive(Debug)]
-pub struct WriteSignal<T>(Rc<RefCell<WriteSignalInner<T>>>);
+pub struct WriteSignal<T>(Rc<WriteSignalInner<T>>);
 
-#[derive(Debug)]
+/// The reading end of a signal.
+///
+/// You typically use this as input to other [derived signals](DerivedSignal), but it also
+/// implements the [`Source`] trait, so you could read the value immediately. Beaware that this
+/// does not respect the [tick method](ReactiveGraph::tick) of the reactive graph. That is, if you
+/// update the value of this signal with [`WriteSignal::set()`], it won't propagate through the
+/// graph unless [`ReactiveGraph::tick`] is called, but it will be reflected on this [`ReadSignal`]
+/// immediately.
+#[derive(Debug, Clone)]
 pub struct ReadSignal<T: Clone> {
     source: WriteSignal<T>,
 
@@ -44,201 +66,46 @@ impl<T> Clone for WriteSignal<T> {
     }
 }
 
-impl<T: Clone> Clone for ReadSignal<T> {
-    fn clone(&self) -> Self {
-        Self {
-            source: self.source.clone(),
-            generation: Cell::new(self.generation.get()),
-        }
-    }
+/// Create a new (reader, writer) signal pair.
+pub fn signal<T: Clone>(initial_value: T) -> (ReadSignal<T>, WriteSignal<T>) {
+    // We set the generation of the `WriteSignal` to 1 and of the `ReadSignal` to 0 to make sure
+    // the `ReadSignal` returns the first value on the first call to `Source::get()`.
+    let write_signal = WriteSignal(Rc::new(WriteSignalInner {
+        value: RefCell::new(initial_value),
+        generation: Cell::new(1),
+    }));
+    let read_signal = ReadSignal {
+        source: write_signal.clone(),
+        generation: Cell::new(0),
+    };
+    (read_signal, write_signal)
 }
 
-impl ReactiveGraph {
-    /// Create a new (reader, writer) signal pair.
-    // This method need not be a method of `ReactiveGraph` as it makes no use of it, but we keep it
-    // like this to align with other signal types.
-    pub fn signal<T: Clone>(&self, initial_value: T) -> (ReadSignal<T>, WriteSignal<T>) {
-        let write_signal = WriteSignal(Rc::new(RefCell::new(WriteSignalInner {
-            value: initial_value,
-            generation: 1,
-        })));
-        let read_signal = ReadSignal {
-            source: write_signal.clone(),
-            generation: Cell::new(0),
-        };
-        (read_signal, write_signal)
-    }
-}
-
-pub trait Source<T> {
-    fn get(&self) -> Option<T>;
-
-    fn get_existing(&self) -> T;
-}
-
-impl<S1, S2, T1, T2> Source<(T1, T2)> for (S1, S2)
-where
-    S1: Source<T1>,
-    S2: Source<T2>,
-{
-    #[inline]
-    fn get(&self) -> Option<(T1, T2)> {
-        match (self.0.get(), self.1.get()) {
-            (Some(x1), Some(x2)) => Some((x1, x2)),
-            (Some(x1), None) => Some((x1, self.1.get_existing())),
-            (None, Some(x2)) => Some((self.0.get_existing(), x2)),
-            (None, None) => None,
-        }
-    }
-
-    #[inline]
-    fn get_existing(&self) -> (T1, T2) {
-        (self.0.get_existing(), self.1.get_existing())
-    }
-}
-
-impl<'a, T, S: Source<T>> Source<T> for &'a S {
-    #[inline(always)]
-    fn get(&self) -> Option<T> {
-        (*self).get()
-    }
-
-    #[inline(always)]
-    fn get_existing(&self) -> T {
-        (*self).get_existing()
-    }
-}
-
-impl<S1, S2, S3, T1, T2, T3> Source<(T1, T2, T3)> for (S1, S2, S3)
-where
-    S1: Source<T1>,
-    S2: Source<T2>,
-    S3: Source<T3>,
-{
-    fn get(&self) -> Option<(T1, T2, T3)> {
-        ((&self.0, &self.1), &self.2)
-            .get()
-            .map(|((x1, x2), x3)| (x1, x2, x3))
-    }
-
-    fn get_existing(&self) -> (T1, T2, T3) {
-        let ((x1, x2), x3) = ((&self.0, &self.1), &self.2).get_existing();
-        (x1, x2, x3)
-    }
-}
-
-impl<S1, S2, S3, S4, T1, T2, T3, T4> Source<(T1, T2, T3, T4)> for (S1, S2, S3, S4)
-where
-    S1: Source<T1>,
-    S2: Source<T2>,
-    S3: Source<T3>,
-    S4: Source<T4>,
-{
-    fn get(&self) -> Option<(T1, T2, T3, T4)> {
-        ((&self.0, &self.1), (&self.2, &self.3))
-            .get()
-            .map(|((x1, x2), (x3, x4))| (x1, x2, x3, x4))
-    }
-
-    fn get_existing(&self) -> (T1, T2, T3, T4) {
-        let ((x1, x2), (x3, x4)) = ((&self.0, &self.1), (&self.2, &self.3)).get_existing();
-        (x1, x2, x3, x4)
-    }
-}
-
-impl<S1, S2, S3, S4, S5, T1, T2, T3, T4, T5> Source<(T1, T2, T3, T4, T5)> for (S1, S2, S3, S4, S5)
-where
-    S1: Source<T1>,
-    S2: Source<T2>,
-    S3: Source<T3>,
-    S4: Source<T4>,
-    S5: Source<T5>,
-{
-    fn get(&self) -> Option<(T1, T2, T3, T4, T5)> {
-        (((&self.0, &self.1), &self.2), (&self.3, &self.4))
-            .get()
-            .map(|(((x1, x2), x3), (x4, x5))| (x1, x2, x3, x4, x5))
-    }
-
-    fn get_existing(&self) -> (T1, T2, T3, T4, T5) {
-        let (((x1, x2), x3), (x4, x5)) =
-            (((&self.0, &self.1), &self.2), (&self.3, &self.4)).get_existing();
-        (x1, x2, x3, x4, x5)
-    }
-}
-
-impl<S, T, const N: usize> Source<[T; N]> for [S; N]
-where
-    S: Source<T>,
-{
-    fn get(&self) -> Option<[T; N]> {
-        let mut found_updated = false;
-        let vals_and_sources: [(Option<T>, &S); N] = self.each_ref().map(|s| {
-            let val = s.get();
-            if val.is_some() {
-                found_updated = true;
-            }
-            (val, s)
-        });
-        if found_updated {
-            Some(vals_and_sources.map(|(val, s)| val.unwrap_or_else(|| s.get_existing())))
-        } else {
-            None
-        }
-    }
-
-    fn get_existing(&self) -> [T; N] {
-        self.each_ref().map(Source::get_existing)
-    }
-}
-
-impl<S, T> Source<Vec<T>> for [S]
-where
-    S: Source<T>,
-{
-    fn get(&self) -> Option<Vec<T>> {
-        let mut found_updated = false;
-        let vals: Vec<Option<T>> = self
-            .iter()
-            .map(|s| {
-                let val = s.get();
-                if val.is_some() {
-                    found_updated = true;
-                }
-                val
-            })
-            .collect();
-        if found_updated {
-            Some(
-                vals.into_iter()
-                    .enumerate()
-                    .map(|(i, val)| val.unwrap_or_else(|| self[i].get_existing()))
-                    .collect(),
-            )
-        } else {
-            None
-        }
-    }
-
-    fn get_existing(&self) -> Vec<T> {
-        self.iter().map(Source::get_existing).collect()
+impl<T> WriteSignal<T> {
+    /// Update the value of the signal, returning the old value.
+    pub fn set(&self, value: T) -> T {
+        self.0.generation.set(self.0.generation.get() + 1);
+        self.0.value.replace(value)
     }
 }
 
 impl<T: Clone> Source<T> for ReadSignal<T> {
     fn get(&self) -> Option<T> {
-        let source = self.source.0.borrow();
-        let generation = self.generation.replace(source.generation);
-        debug_assert!(generation <= source.generation);
-        if generation < source.generation {
-            Some(source.value.clone())
+        let source = &self.source.0;
+
+        let source_generation = source.generation.get();
+        let generation = self.generation.replace(source_generation);
+        debug_assert!(generation <= source_generation);
+
+        if generation < source_generation {
+            Some(source.value.borrow().clone())
         } else {
             None
         }
     }
 
     fn get_existing(&self) -> T {
-        self.source.0.borrow().value.clone()
+        self.source.0.value.borrow().clone()
     }
 }
 
@@ -252,14 +119,29 @@ struct DerivedSignalInner<T> {
     /// The most recently evaluated value.
     last_value: T,
 
-    /// The [`ReactiveGraph::generation`] when this was last evalueated.
+    /// The [`ReactiveGraph::generation`] when this was last evaluated.
     rgraph_generation: u64,
 }
 
+/// A node in the reactive graph computing its value based on other nodes in the graph.
+///
+/// Remember that new values will be propagated through the graph only after a call to
+/// [`ReactiveGraph::tick()`]. This means that subsequent calls to [`Source::get()`] will return
+/// [`None`] till the next call to [`ReactiveGraph::tick()`].
 #[derive(Clone)]
 pub struct DerivedSignal<T: Clone>(Rc<RefCell<DerivedSignalInner<T>>>);
 
 impl ReactiveGraph {
+    /// Create a [`DerivedSignal`]: a node in the reactive graph with an evaluation based on other
+    /// sources.
+    ///
+    /// The source could for instance be a [`ReadSignal`], a [`DerivedSignal`], or a tuple of
+    /// sources. The function `f` then excepts the output of this source and computes the new
+    /// value.
+    ///
+    /// Note that calls to [`Source::get()`] on this signal will return [`None`] before the next
+    /// call to [`ReactiveGraph::tick()`]. But calls to [`Source::get_existing()`] will return the
+    /// existing value of this signal based on the current value of the sources.
     pub fn derived_signal<S, U, T>(
         self: &Rc<Self>,
         source: S,
@@ -301,11 +183,5 @@ impl<T: Clone> Source<T> for DerivedSignal<T> {
 
     fn get_existing(&self) -> T {
         self.0.borrow().last_value.clone()
-    }
-}
-
-impl ReactiveGraph {
-    pub fn tick(&self) {
-        self.generation.set(self.generation.get() + 1);
     }
 }
