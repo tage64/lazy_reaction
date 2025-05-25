@@ -1,7 +1,8 @@
 mod source;
-pub use source::Source;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+
+pub use source::Source;
 
 /// A graph of signals and some kind of lazy evaluation.
 ///
