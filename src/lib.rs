@@ -56,17 +56,17 @@
 //! ```
 //! use lazy_reaction::{ReactiveGraph, Source, signal};
 //!
-//! let (get_year, set_year) = signal(1997);
-//! let (get_month, set_month) = signal(7);
-//! let (get_day, set_day) = signal(8);
+//! let (get_year, set_year) = signal(1989);
+//! let (get_month, set_month) = signal(11);
+//! let (get_day, set_day) = signal(9);
 //!
 //! // Initial call to get() will return the values but subsequent will not.
-//! assert_eq!(get_year.get(), Some(1997));
+//! assert_eq!(get_year.get(), Some(1989));
 //! assert_eq!(get_year.get(), None);
 //! assert_eq!(get_year.get(), None);
 //! // However get_existing() works.
-//! assert_eq!(get_year.get_existing(), 1997);
-//! assert_eq!(get_month.get_existing(), 7);
+//! assert_eq!(get_year.get_existing(), 1989);
+//! assert_eq!(get_month.get_existing(), 11);
 //!
 //! // Let's create derived signals that format these items.
 //! // We begin by constructing a reactive graph:
@@ -76,9 +76,9 @@
 //! // get_year is the source, and is cheaply clonable.
 //! let formatted_year = rgraph.derived_signal(get_year.clone(), |year| year.to_string());
 //!
-//! assert_eq!(formatted_year.get(), Some("1997".to_string()));
+//! assert_eq!(formatted_year.get(), Some("1989".to_string()));
 //! assert_eq!(formatted_year.get(), None);
-//! assert_eq!(formatted_year.get_existing(), "1997");
+//! assert_eq!(formatted_year.get_existing(), "1989");
 //!
 //! // It is usually better to use a memo. Then the value will only be considered updated if it has
 //! // changed.
@@ -92,11 +92,32 @@
 //!     |(yyyy, mm, dd)| format!("{yyyy}-{mm}-{dd}"),
 //! );
 //!
+//! // A value is immediately available based on the get_existing() calls of the sources.
+//! assert_eq!(formatted_date.get(), Some("1989-11-09".to_string()));
+//! assert_eq!(formatted_date.get(), None);
+//!
 //! // Let's make a tick of the graph!
 //! rgraph.tick();
 //!
-//! assert_eq!(formatted_date.get(), Some("1997-07-08".to_string()));
+//! // Nothing has changed so get() still returns None.
 //! assert_eq!(formatted_date.get(), None);
+//! assert_eq!(formatted_date.get_existing(), "1989-11-09");
+//!
+//! // Let's change dates.
+//! set_year.set(1991);
+//! assert_eq!(get_year.get(), Some(1991));
+//! set_month.set(12);
+//! set_day.set(8);
+//! // We haven't called tick() yet so nothing has been updated.
+//! assert_eq!(formatted_date.get(), None);
+//!
+//! rgraph.tick();
+//! assert_eq!(formatted_date.get(), Some("1991-12-08".to_string()));
+//!
+//! set_year.set(2024);
+//!
+//! rgraph.tick();
+//! assert_eq!(formatted_date.get(), Some("2024-12-08".to_string()));
 //! ```
 
 mod source;
@@ -345,7 +366,7 @@ impl ReactiveGraph {
         S: Source<U> + 'static,
         T: Clone + PartialEq,
     {
-        self.memo_with_comparator(source, move |_old_val, x| f(x), |lhs, rhs| lhs == rhs)
+        self.memo_with_comparator(source, move |_old_val, x| f(x), |lhs, rhs| lhs != rhs)
     }
 
     /// Like [`memo()`](Self::memo) but the evaluation function takes a mutable reference to the previous value
@@ -384,7 +405,40 @@ impl ReactiveGraph {
 
 impl<T: Clone> Source<T> for DerivedSignal<T> {
     fn get(&self) -> Option<T> {
-        todo!()
+        // Check if a tick has occurred on the graph and we need to compute a new value.
+        let graph_generation = self.node.graph.generation.get().get();
+        let my_graph_generation = self.node.graph_generation.replace(graph_generation);
+        debug_assert!(my_graph_generation <= graph_generation);
+        if my_graph_generation < graph_generation {
+            // Check if the source has a newer value.
+            let mut inner = self.node.inner.borrow_mut();
+            let inner = &mut *inner; // To be able to borrow fields simultaneously.
+            if let Some(x) = (inner.func)(&inner.value) {
+                // A new value is computed!
+                inner.value = x.clone();
+                // Bump the value generation.
+                self.node.val_generation.set(
+                    self.node
+                        .val_generation
+                        .get()
+                        .checked_add(1)
+                        .expect("DerivedSignal: val_generation overflow"),
+                );
+                self.val_generation
+                    .set(self.node.val_generation.get().get());
+                return Some(x);
+            }
+        }
+
+        // Check if self.val_generation is lagging behind self.node.val_generation.
+        let val_generation = self.node.val_generation.get().get();
+        let my_val_generation = self.val_generation.replace(val_generation);
+        debug_assert!(my_val_generation <= val_generation);
+        if my_val_generation < val_generation {
+            return Some(self.get_existing());
+        }
+
+        None
     }
 
     fn get_existing(&self) -> T {
