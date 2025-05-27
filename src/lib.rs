@@ -136,11 +136,17 @@ pub struct ReactiveGraph {
     generation: Cell<NonZero<u64>>,
 }
 
+impl Default for ReactiveGraph {
+    fn default() -> Self {
+        Self {
+            generation: Cell::new(NonZero::new(1).unwrap()),
+        }
+    }
+}
+
 impl ReactiveGraph {
     pub fn new() -> Rc<Self> {
-        Rc::new(Self {
-            generation: Cell::new(NonZero::new(1).unwrap()),
-        })
+        Rc::new(Self::default())
     }
 
     /// A call to this method propagates updated values through the graph. Call this when you will
