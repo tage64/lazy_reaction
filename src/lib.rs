@@ -202,16 +202,20 @@ pub struct ReadSignal<T> {
 
 /// Create a new (reader, writer) signal pair.
 pub fn signal<T>(initial_value: T) -> (ReadSignal<T>, WriteSignal<T>) {
-    // We set the generation of the `WriteSignal` to 1 and of the `ReadSignal` to 0 to make sure
-    // the `ReadSignal` returns the first value on the first call to `Source::get()`.
-    let write_signal = WriteSignal(Arc::new(RwLock::new(WriteSignalInner {
-        value: initial_value,
-        val_generation: NonZero::new(1).unwrap(),
-    })));
+    let write_signal = WriteSignal::new(initial_value);
     (write_signal.subscribe(), write_signal)
 }
 
 impl<T> WriteSignal<T> {
+    pub fn new(initial_value: T) -> Self {
+        // We set the generation of the `WriteSignal` to 1 and of the `ReadSignal` to 0 to make sure
+        // the `ReadSignal` returns the first value on the first call to `Source::get()`.
+        WriteSignal(Arc::new(RwLock::new(WriteSignalInner {
+            value: initial_value,
+            val_generation: NonZero::new(1).unwrap(),
+        })))
+    }
+
     /// Get a reader to this signal.
     pub fn subscribe(&self) -> ReadSignal<T> {
         ReadSignal {
@@ -300,6 +304,12 @@ impl<T> WriteSignal<T> {
 impl<T> Clone for WriteSignal<T> {
     fn clone(&self) -> Self {
         WriteSignal(self.0.clone())
+    }
+}
+
+impl<T: Default> Default for WriteSignal<T> {
+    fn default() -> Self {
+        Self::new(T::default())
     }
 }
 
