@@ -123,10 +123,11 @@
 mod source;
 use std::mem;
 use std::num::NonZero;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockReadGuard};
 pub use source::Source;
 
 /// A graph of signals and some kind of lazy evaluation.
@@ -222,6 +223,14 @@ impl<T> WriteSignal<T> {
             source: self.clone(),
             val_generation: 0,
         }
+    }
+
+    /// Get a reference to the value without having to subscribe a reader.
+    ///
+    /// Note that this returns a read-lock of the value, so you shouldn't update the value
+    /// simultaneously.
+    pub fn value(&self) -> impl Deref<Target = T> {
+        RwLockReadGuard::map(self.0.read(), |x| &x.value)
     }
 
     /// Update the value of the signal if the new value is not equal to the existing. Returns the
