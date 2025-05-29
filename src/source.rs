@@ -4,30 +4,14 @@
 //! - Arrays: `impl<S, const N> Source for [S; N]`
 //! - and slices: `impl<S> Source for [S]`
 //! All the above assume `S: Source`.
+use seq_macro::seq;
 
 pub trait Source<T> {
-    fn get(&self) -> Option<T>;
+    fn get(&mut self) -> Option<T>;
 
     fn get_existing(&self) -> T;
 
-    fn reset(&self);
-}
-
-impl<'a, T, S: Source<T>> Source<T> for &'a S {
-    #[inline(always)]
-    fn get(&self) -> Option<T> {
-        (*self).get()
-    }
-
-    #[inline(always)]
-    fn get_existing(&self) -> T {
-        (*self).get_existing()
-    }
-
-    #[inline(always)]
-    fn reset(&self) {
-        (*self).reset()
-    }
+    fn reset(&mut self);
 }
 
 impl<S1, S2, T1, T2> Source<(T1, T2)> for (S1, S2)
@@ -35,8 +19,8 @@ where
     S1: Source<T1>,
     S2: Source<T2>,
 {
-    #[inline] // Inlined because it is used in the implementation for larger tuple sizes.
-    fn get(&self) -> Option<(T1, T2)> {
+    #[inline]
+    fn get(&mut self) -> Option<(T1, T2)> {
         match (self.0.get(), self.1.get()) {
             (Some(x1), Some(x2)) => Some((x1, x2)),
             (Some(x1), None) => Some((x1, self.1.get_existing())),
@@ -45,104 +29,77 @@ where
         }
     }
 
-    #[inline] // Inlined because it is used in the implementation for larger tuple sizes.
+    #[inline]
     fn get_existing(&self) -> (T1, T2) {
         (self.0.get_existing(), self.1.get_existing())
     }
 
     #[inline]
-    fn reset(&self) {
+    fn reset(&mut self) {
         self.0.reset();
         self.1.reset();
     }
 }
 
-impl<S1, S2, S3, T1, T2, T3> Source<(T1, T2, T3)> for (S1, S2, S3)
-where
-    S1: Source<T1>,
-    S2: Source<T2>,
-    S3: Source<T3>,
-{
-    fn get(&self) -> Option<(T1, T2, T3)> {
-        ((&self.0, &self.1), &self.2)
-            .get()
-            .map(|((x1, x2), x3)| (x1, x2, x3))
-    }
+/// Generate `Source` for an N-element tuple of sources.
+///
+/// ```rust
+/// impl_source_for_tuple!(3); // (S0, S1, S2)
+/// impl_source_for_tuple!(5); // (S0, …, S4)
+/// ```
+macro_rules! impl_source_for_tuple {
+    ($n:literal) => {
+        seq!(I in 0..$n {
+            impl< #( S~I, T~I, )* > Source<(#( T~I, )*)> for (#( S~I, )*)
+            where #( S~I: Source<T~I>, )*
+            {
+                #[inline]
+                fn get(&mut self) -> Option<( #(T~I, )*)> {
+                    let (#(s~I, )*) = self;
 
-    fn get_existing(&self) -> (T1, T2, T3) {
-        let ((x1, x2), x3) = ((&self.0, &self.1), &self.2).get_existing();
-        (x1, x2, x3)
-    }
+                    // Call `get` on every inner source …
+                    #( let o~I = s~I.get(); )*
 
-    fn reset(&self) {
-        self.0.reset();
-        self.1.reset();
-        self.2.reset();
-    }
+                    // …and see whether at least one of them produced `Some`.
+                    if #(o~I.is_some() || )* false {
+                        Some((
+                            #( o~I.unwrap_or_else(|| s~I.get_existing()), )*
+                        ))
+                    } else {
+                        None
+                    }
+                }
+
+                #[inline]
+                fn get_existing(&self) -> (#( T~I ,)*) {
+                    let (#(s~I, )*) = self;
+                    (#(s~I.get_existing(), )*)
+                }
+
+                #[inline]
+                fn reset(&mut self) {
+                    let (#(s~I, )*) = self;
+                    #(s~I.reset(); )*
+                }
+            }
+        });
+    };
 }
 
-impl<S1, S2, S3, S4, T1, T2, T3, T4> Source<(T1, T2, T3, T4)> for (S1, S2, S3, S4)
-where
-    S1: Source<T1>,
-    S2: Source<T2>,
-    S3: Source<T3>,
-    S4: Source<T4>,
-{
-    fn get(&self) -> Option<(T1, T2, T3, T4)> {
-        ((&self.0, &self.1), (&self.2, &self.3))
-            .get()
-            .map(|((x1, x2), (x3, x4))| (x1, x2, x3, x4))
-    }
-
-    fn get_existing(&self) -> (T1, T2, T3, T4) {
-        let ((x1, x2), (x3, x4)) = ((&self.0, &self.1), (&self.2, &self.3)).get_existing();
-        (x1, x2, x3, x4)
-    }
-
-    fn reset(&self) {
-        self.0.reset();
-        self.1.reset();
-        self.2.reset();
-        self.3.reset();
-    }
-}
-
-impl<S1, S2, S3, S4, S5, T1, T2, T3, T4, T5> Source<(T1, T2, T3, T4, T5)> for (S1, S2, S3, S4, S5)
-where
-    S1: Source<T1>,
-    S2: Source<T2>,
-    S3: Source<T3>,
-    S4: Source<T4>,
-    S5: Source<T5>,
-{
-    fn get(&self) -> Option<(T1, T2, T3, T4, T5)> {
-        (((&self.0, &self.1), &self.2), (&self.3, &self.4))
-            .get()
-            .map(|(((x1, x2), x3), (x4, x5))| (x1, x2, x3, x4, x5))
-    }
-
-    fn get_existing(&self) -> (T1, T2, T3, T4, T5) {
-        let (((x1, x2), x3), (x4, x5)) =
-            (((&self.0, &self.1), &self.2), (&self.3, &self.4)).get_existing();
-        (x1, x2, x3, x4, x5)
-    }
-
-    fn reset(&self) {
-        self.0.reset();
-        self.1.reset();
-        self.2.reset();
-        self.3.reset();
-        self.4.reset();
-    }
-}
+impl_source_for_tuple!(3);
+impl_source_for_tuple!(4);
+impl_source_for_tuple!(5);
+impl_source_for_tuple!(6);
+impl_source_for_tuple!(7);
+impl_source_for_tuple!(8);
 
 impl<S, T, const N: usize> Source<[T; N]> for [S; N]
 where
     S: Source<T>,
 {
-    fn get(&self) -> Option<[T; N]> {
+    fn get(&mut self) -> Option<[T; N]> {
         let mut found_updated = false;
-        let vals_and_sources: [(Option<T>, &S); N] = self.each_ref().map(|s| {
+        let vals_and_sources: [(Option<T>, &mut S); N] = self.each_mut().map(|s| {
             let val = s.get();
             if val.is_some() {
                 found_updated = true;
@@ -160,8 +117,8 @@ where
         self.each_ref().map(Source::get_existing)
     }
 
-    fn reset(&self) {
-        for source in self.iter() {
+    fn reset(&mut self) {
+        for source in self.iter_mut() {
             source.reset();
         }
     }
@@ -171,10 +128,10 @@ impl<S, T> Source<Vec<T>> for [S]
 where
     S: Source<T> + Clone,
 {
-    fn get(&self) -> Option<Vec<T>> {
+    fn get(&mut self) -> Option<Vec<T>> {
         let mut found_updated = false;
         let vals: Vec<Option<T>> = self
-            .iter()
+            .iter_mut()
             .map(|s| {
                 let val = s.get();
                 if val.is_some() {
@@ -199,8 +156,8 @@ where
         self.iter().map(Source::get_existing).collect()
     }
 
-    fn reset(&self) {
-        for source in self.iter() {
+    fn reset(&mut self) {
+        for source in self.iter_mut() {
             source.reset();
         }
     }
