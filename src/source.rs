@@ -42,11 +42,6 @@ where
 }
 
 /// Generate `Source` for an N-element tuple of sources.
-///
-/// ```rust
-/// impl_source_for_tuple!(3); // (S0, S1, S2)
-/// impl_source_for_tuple!(5); // (S0, …, S4)
-/// ```
 macro_rules! impl_source_for_tuple {
     ($n:literal) => {
         seq!(I in 0..$n {

@@ -56,7 +56,7 @@
 //! ```
 //! use lazy_reaction::{ReactiveGraph, Source, signal};
 //!
-//! let (get_year, set_year) = signal(1989);
+//! let (mut get_year, set_year) = signal(1989);
 //! let (get_month, set_month) = signal(11);
 //! let (get_day, set_day) = signal(9);
 //!
@@ -74,7 +74,7 @@
 //!
 //! // And then we add the derived signals.
 //! // get_year is the source, and is cheaply clonable.
-//! let formatted_year = rgraph.derived_signal(get_year.clone(), |year| year.to_string());
+//! let mut formatted_year = rgraph.derived_signal(get_year.clone(), |year| year.to_string());
 //!
 //! assert_eq!(formatted_year.get(), Some("1989".to_string()));
 //! assert_eq!(formatted_year.get(), None);
@@ -82,12 +82,12 @@
 //!
 //! // It is usually better to use a memo. Then the value will only be considered updated if it has
 //! // changed.
-//! let formatted_month = rgraph.memo(get_month, |m| format!("{m:02}"));
-//! let formatted_day = rgraph.memo(get_day, |d| format!("{d:02}"));
+//! let mut formatted_month = rgraph.memo(get_month, |m| format!("{m:02}"));
+//! let mut formatted_day = rgraph.memo(get_day, |d| format!("{d:02}"));
 //!
 //! // Now we show the real power of the system! We agrigate these derived signals to a formatted
 //! // date. This will only be reevaluated if any of the input signals changed.
-//! let formatted_date = rgraph.memo(
+//! let mut formatted_date = rgraph.memo(
 //!     (formatted_year, formatted_month, formatted_day),
 //!     |(yyyy, mm, dd)| format!("{yyyy}-{mm}-{dd}"),
 //! );
@@ -133,29 +133,34 @@ pub use source::Source;
 ///
 /// This is a graph for signals and derived computations. You should use this graph to create nodes
 /// in the graph and to signal a tick in the graph.
-pub struct ReactiveGraph {
+#[derive(Debug, Clone)]
+pub struct ReactiveGraph(Arc<ReactiveGraphInner>);
+
+#[derive(Debug)]
+struct ReactiveGraphInner {
     /// A value that will be incremented at every reactive step.
+    ///
+    /// Starts at 1 so that there is always a lower value for new or reset nodes.
     generation: AtomicU64,
 }
 
 impl Default for ReactiveGraph {
     fn default() -> Self {
-        Self {
+        ReactiveGraph(Arc::new(ReactiveGraphInner {
             generation: AtomicU64::new(1),
-        }
+        }))
     }
 }
 
 impl ReactiveGraph {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self::default())
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// A call to this method propagates updated values through the graph. Call this when you will
     /// be able to observe the changes of any updated signals since the last tick.
     pub fn tick(&self) {
-        // FIXME: Is this ordering correct?
-        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.0.generation.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -165,7 +170,9 @@ struct WriteSignalInner<T> {
     value: T,
 
     /// A generation that will be incremented every time the value is updated.
-    generation: NonZero<u64>,
+    ///
+    /// Starts at 1 so that a fresh reader could set its generation to a lower value.
+    val_generation: NonZero<u64>,
 }
 
 /// The writing end of a signal.
@@ -174,7 +181,7 @@ struct WriteSignalInner<T> {
 /// will not be propagated through the reactive graph until the
 /// [`tick`-method](ReactiveGraph::tick) has been called. Only the reading end of this signal is
 /// able to observe the changes instantly.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WriteSignal<T>(Arc<RwLock<WriteSignalInner<T>>>);
 
 /// The reading end of a signal.
@@ -185,27 +192,12 @@ pub struct WriteSignal<T>(Arc<RwLock<WriteSignalInner<T>>>);
 /// update the value of this signal with [`WriteSignal::set()`], it won't propagate through the
 /// graph unless [`ReactiveGraph::tick`] is called, but it will be reflected on this [`ReadSignal`]
 /// immediately.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ReadSignal<T: Clone> {
     source: WriteSignal<T>,
 
     /// The generation of the value when it was last read.
-    generation: AtomicU64,
-}
-
-impl<T> Clone for WriteSignal<T> {
-    fn clone(&self) -> Self {
-        WriteSignal(self.0.clone())
-    }
-}
-
-impl<T: Clone> Clone for ReadSignal<T> {
-    fn clone(&self) -> Self {
-        Self {
-            source: self.source.clone(),
-            generation: AtomicU64::new(self.generation.load(Ordering::Relaxed)),
-        }
-    }
+    val_generation: u64,
 }
 
 /// Create a new (reader, writer) signal pair.
@@ -214,11 +206,11 @@ pub fn signal<T: Clone>(initial_value: T) -> (ReadSignal<T>, WriteSignal<T>) {
     // the `ReadSignal` returns the first value on the first call to `Source::get()`.
     let write_signal = WriteSignal(Arc::new(RwLock::new(WriteSignalInner {
         value: initial_value,
-        generation: NonZero::new(1).unwrap(),
+        val_generation: NonZero::new(1).unwrap(),
     })));
     let read_signal = ReadSignal {
         source: write_signal.clone(),
-        generation: AtomicU64::new(0),
+        val_generation: 0,
     };
     (read_signal, write_signal)
 }
@@ -227,21 +219,24 @@ impl<T> WriteSignal<T> {
     /// Update the value of the signal, returning the old value.
     pub fn set(&self, value: T) -> T {
         let mut self_ = self.0.write();
-        self_.generation = self_
-            .generation
+
+        // Increment the generation.
+        // Pssst: the syntax for updating `NonZero` types needs some refinement :)
+        self_.val_generation = self_
+            .val_generation
             .checked_add(1)
             .expect("WriteSignal generation overflow");
+
         mem::replace(&mut self_.value, value)
     }
 }
 
 impl<T: Clone> Source<T> for ReadSignal<T> {
-    fn get(&self) -> Option<T> {
+    fn get(&mut self) -> Option<T> {
         let source = &self.source.0.read();
 
-        let source_generation = source.generation.get();
-        // FIXME: Is this ordering correct?
-        let my_generation = self.generation.swap(source_generation, Ordering::Relaxed);
+        let source_generation = source.val_generation.get();
+        let my_generation = mem::replace(&mut self.val_generation, source_generation);
         debug_assert!(my_generation <= source_generation);
 
         if my_generation < source_generation {
@@ -255,12 +250,19 @@ impl<T: Clone> Source<T> for ReadSignal<T> {
         self.source.0.read().value.clone()
     }
 
-    fn reset(&self) {
-        self.generation.store(0, Ordering::Relaxed);
+    fn reset(&mut self) {
+        self.val_generation = 0;
     }
 }
 
-struct NodeInner<T> {
+struct Node<T> {
+    /// The [`ReactiveGraph`] for this node.
+    graph: ReactiveGraph,
+
+    /// The [`ReactiveGraph::generation`] when this was last evaluated, or 0 if it never has been
+    /// generated.
+    graph_generation: u64,
+
     /// The most recently evaluated value.
     value: T,
 
@@ -272,36 +274,25 @@ struct NodeInner<T> {
     val_generation: NonZero<u64>,
 }
 
-struct Node<T> {
-    // This is stored in an inner-struct so it can be wrapped in a `RefCell`.
-    inner: RwLock<NodeInner<T>>,
-
-    /// The [`ReactiveGraph`] for this node.
-    graph: Arc<ReactiveGraph>,
-
-    /// The [`ReactiveGraph::generation`] when this was last evaluated, or 0 if it never has been
-    /// generated.
-    graph_generation: AtomicU64,
-}
-
 /// A node in the reactive graph computing its value based on other nodes in the graph.
 ///
 /// Remember that new values will be propagated through the graph only after a call to
 /// [`ReactiveGraph::tick()`]. This means that subsequent calls to [`Source::get()`] will return
 /// [`None`] till the next call to [`ReactiveGraph::tick()`].
+#[derive(Clone)]
 pub struct DerivedSignal<T: Clone> {
-    node: Arc<Node<T>>,
+    node: Arc<RwLock<Node<T>>>,
 
     /// The value generation when this reader last called [`Source::get()`], or 0 if it has never
     /// been called or if reset.
-    val_generation: AtomicU64,
+    val_generation: u64,
 }
 
 impl<T: Clone> DerivedSignal<T> {
     /// Convenience method to avoid code duplication.
     fn new<S, U>(
-        graph: Arc<ReactiveGraph>,
-        source: S,
+        graph: ReactiveGraph,
+        mut source: S,
         mut f: impl FnMut(Option<&T>, U) -> T + Send + Sync + 'static,
         mut has_changed: impl FnMut(&T, &T) -> bool + Send + Sync + 'static,
     ) -> Self
@@ -318,25 +309,14 @@ impl<T: Clone> DerivedSignal<T> {
                 .filter(|x| has_changed(prev_val, x))
         });
         Self {
-            node: Arc::new(Node {
-                inner: RwLock::new(NodeInner {
-                    value,
-                    func,
-                    val_generation: NonZero::new(1).unwrap(),
-                }),
+            node: Arc::new(RwLock::new(Node {
+                value,
+                func,
+                val_generation: NonZero::new(1).unwrap(),
                 graph,
-                graph_generation: AtomicU64::new(0),
-            }),
-            val_generation: AtomicU64::new(0),
-        }
-    }
-}
-
-impl<T: Clone> Clone for DerivedSignal<T> {
-    fn clone(&self) -> Self {
-        Self {
-            node: self.node.clone(),
-            val_generation: AtomicU64::new(self.val_generation.load(Ordering::Relaxed)),
+                graph_generation: 0,
+            })),
+            val_generation: 0,
         }
     }
 }
@@ -353,7 +333,7 @@ impl ReactiveGraph {
     /// call to [`ReactiveGraph::tick()`]. But calls to [`Source::get_existing()`] will return the
     /// existing value of this signal based on the current value of the sources.
     pub fn derived_signal<S, U, T>(
-        self: &Arc<Self>,
+        self: &Self,
         source: S,
         mut f: impl FnMut(U) -> T + Send + Sync + 'static,
     ) -> DerivedSignal<T>
@@ -367,7 +347,7 @@ impl ReactiveGraph {
     /// Like [`derived_signal()`](Self::derived_signal) but the evaluation function gets a reference to the previous
     /// value as well (except for the first time).
     pub fn derived_signal_with_old_val<S, U, T>(
-        self: &Arc<Self>,
+        self: &Self,
         source: S,
         f: impl FnMut(Option<&T>, U) -> T + Send + Sync + 'static,
     ) -> DerivedSignal<T>
@@ -381,7 +361,7 @@ impl ReactiveGraph {
     /// Create a [`DerivedSignal`] that only propagates a new value if it has changed according
     /// to the [`PartialEq`] implementation.
     pub fn memo<S, U, T>(
-        self: &Arc<Self>,
+        self: &Self,
         source: S,
         mut f: impl FnMut(U) -> T + Send + Sync + 'static,
     ) -> DerivedSignal<T>
@@ -395,7 +375,7 @@ impl ReactiveGraph {
     /// Like [`memo()`](Self::memo) but the evaluation function takes a mutable reference to the previous value
     /// as well (except for the first evaluation).
     pub fn memo_with_old_val<S, U, T>(
-        self: &Arc<Self>,
+        self: &Self,
         source: S,
         mut f: impl FnMut(Option<&T>, U) -> T + Send + Sync + 'static,
     ) -> DerivedSignal<T>
@@ -413,7 +393,7 @@ impl ReactiveGraph {
     /// Create a [`DerivedSignal`] that only propagate a new value if it has changed according
     /// to a comparison function.
     pub fn memo_with_comparator<S, U, T>(
-        self: &Arc<Self>,
+        self: &Self,
         source: S,
         f: impl FnMut(Option<&T>, U) -> T + Send + Sync + 'static,
         has_changed: impl FnMut(&T, &T) -> bool + Send + Sync + 'static,
@@ -427,31 +407,31 @@ impl ReactiveGraph {
 }
 
 impl<T: Clone> Source<T> for DerivedSignal<T> {
-    fn get(&self) -> Option<T> {
-        let mut inner = self.node.inner.upgradable_read();
-
-        // FIXME: Are the atomic orderings correct for this function?
+    fn get(&mut self) -> Option<T> {
+        let mut node = self.node.upgradable_read();
 
         // Check if a tick has occurred on the graph and we need to compute a new value.
-        let graph_generation = self.node.graph.generation.load(Ordering::Relaxed);
-        let my_graph_generation = self
-            .node
-            .graph_generation
-            .swap(graph_generation, Ordering::Relaxed);
-        debug_assert!(my_graph_generation <= graph_generation);
-        if my_graph_generation < graph_generation {
-            // Check if the source has a newer value.
-            let maybe_new_value = inner.with_upgraded(|inner| {
-                if let Some(x) = (inner.func)(&inner.value) {
+        let graph_generation = node.graph.0.generation.load(Ordering::Acquire);
+        debug_assert!(node.graph_generation <= graph_generation);
+        if node.graph_generation < graph_generation {
+            let maybe_new_value = node.with_upgraded(|node| {
+                // Update the graph generation.
+                node.graph_generation = graph_generation;
+
+                // Check if the source has a newer value.
+                if let Some(x) = (node.func)(&node.value) {
                     // A new value is computed!
-                    inner.value = x.clone();
+                    node.value = x.clone();
                     // Bump the value generation.
-                    inner.val_generation = inner
+                    // This is the bad `NonZero +=`-syntax again :)
+                    node.val_generation = node
                         .val_generation
                         .checked_add(1)
                         .expect("DerivedSignal: val_generation overflow");
-                    self.val_generation
-                        .store(inner.val_generation.get(), Ordering::Release);
+
+                    // Update the value generation of this reader as well.
+                    self.val_generation = node.val_generation.get();
+
                     Some(x)
                 } else {
                     None
@@ -464,21 +444,21 @@ impl<T: Clone> Source<T> for DerivedSignal<T> {
         }
 
         // Check if self.val_generation is lagging behind self.node.val_generation.
-        let val_generation = inner.val_generation.get();
-        let my_val_generation = self.val_generation.swap(val_generation, Ordering::Relaxed);
+        let val_generation = node.val_generation.get();
+        let my_val_generation = mem::replace(&mut self.val_generation, val_generation);
         debug_assert!(my_val_generation <= val_generation);
         if my_val_generation < val_generation {
-            return Some(inner.value.clone());
+            return Some(node.value.clone());
         }
 
         None
     }
 
     fn get_existing(&self) -> T {
-        self.node.inner.read().value.clone()
+        self.node.read().value.clone()
     }
 
-    fn reset(&self) {
-        self.val_generation.store(0, Ordering::Relaxed);
+    fn reset(&mut self) {
+        self.val_generation = 0;
     }
 }

@@ -2,7 +2,7 @@ use lazy_reaction::{ReactiveGraph, Source, signal};
 
 #[test]
 fn test_signals() {
-    let (get_year, set_year) = signal(1789);
+    let (mut get_year, set_year) = signal(1789);
     assert_eq!(get_year.get_existing(), 1789);
     assert_eq!(get_year.get(), Some(1789));
     assert_eq!(get_year.get(), None);
@@ -43,8 +43,8 @@ fn test_derived_signals() {
     let rgraph = ReactiveGraph::new();
 
     let (get_year, set_year) = signal(1813);
-    let (get_name, set_name) = signal("Elizabeth");
-    let text = rgraph.derived_signal((get_year, get_name), |(year, name)| {
+    let (get_name, _) = signal("Elizabeth");
+    let mut text = rgraph.derived_signal((get_year, get_name), |(year, name)| {
         format!("{year}: {name}")
     });
 
