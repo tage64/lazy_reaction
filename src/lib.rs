@@ -181,7 +181,7 @@ struct WriteSignalInner<T> {
 /// will not be propagated through the reactive graph until the
 /// [`tick`-method](ReactiveGraph::tick) has been called. Only the reading end of this signal is
 /// able to observe the changes instantly.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct WriteSignal<T>(Arc<RwLock<WriteSignalInner<T>>>);
 
 /// The reading end of a signal.
@@ -192,8 +192,8 @@ pub struct WriteSignal<T>(Arc<RwLock<WriteSignalInner<T>>>);
 /// update the value of this signal with [`WriteSignal::set()`], it won't propagate through the
 /// graph unless [`ReactiveGraph::tick`] is called, but it will be reflected on this [`ReadSignal`]
 /// immediately.
-#[derive(Debug, Clone)]
-pub struct ReadSignal<T: Clone> {
+#[derive(Debug)]
+pub struct ReadSignal<T> {
     source: WriteSignal<T>,
 
     /// The generation of the value when it was last read.
@@ -201,33 +201,114 @@ pub struct ReadSignal<T: Clone> {
 }
 
 /// Create a new (reader, writer) signal pair.
-pub fn signal<T: Clone>(initial_value: T) -> (ReadSignal<T>, WriteSignal<T>) {
+pub fn signal<T>(initial_value: T) -> (ReadSignal<T>, WriteSignal<T>) {
     // We set the generation of the `WriteSignal` to 1 and of the `ReadSignal` to 0 to make sure
     // the `ReadSignal` returns the first value on the first call to `Source::get()`.
     let write_signal = WriteSignal(Arc::new(RwLock::new(WriteSignalInner {
         value: initial_value,
         val_generation: NonZero::new(1).unwrap(),
     })));
-    let read_signal = ReadSignal {
-        source: write_signal.clone(),
-        val_generation: 0,
-    };
-    (read_signal, write_signal)
+    (write_signal.subscribe(), write_signal)
 }
 
 impl<T> WriteSignal<T> {
+    /// Get a reader to this signal.
+    pub fn subscribe(&self) -> ReadSignal<T> {
+        ReadSignal {
+            source: self.clone(),
+            val_generation: 0,
+        }
+    }
+
+    /// Update the value of the signal if the new value is not equal to the existing. Returns the
+    /// old value if updated, otherwise returns `Err(value)`.
+    pub fn set_if_changed(&self, value: T) -> Result<T, T>
+    where
+        T: PartialEq,
+    {
+        self.update_with(|x| {
+            if value == *x {
+                (false, Err(value))
+            } else {
+                let old_value = mem::replace(x, value);
+                (true, Ok(old_value))
+            }
+        })
+    }
+
+    /// Get a mutable reference to the value and possibly update it. The change will be propagated
+    /// if the old value is not equal to the new.
+    ///
+    /// Returns [`Ok`] with the old value if it did change or [`Err`] if it was unchanged.
+    ///
+    /// Note that this requires an extra clone of the inner value. You may also use
+    /// [`Self::set_if_changed()`], [`Self::update_with()`] or [`Self::update()`] if this is
+    /// undesirable.
+    pub fn update_if_changed<U>(&self, f: impl FnOnce(&mut T) -> U) -> Result<(T, U), U>
+    where
+        T: PartialEq + Clone,
+    {
+        self.update_with(|x| {
+            let old_value = x.clone();
+            let ret = f(x);
+            if *x == old_value {
+                (false, Err(ret)) // Not updated.
+            } else {
+                (true, Ok((old_value, ret)))
+            }
+        })
+    }
+
     /// Update the value of the signal, returning the old value.
     pub fn set(&self, value: T) -> T {
+        self.update(|x| mem::replace(x, value))
+    }
+
+    /// Update the value by a mutable reference.
+    pub fn update<U>(&self, f: impl FnOnce(&mut T) -> U) -> U {
+        self.update_with(|x| (true, f(x)))
+    }
+
+    /// You get a mutable reference to the value and return a `(changed, ret)` tuple where
+    /// `changed` is a bool indicating if the value did change and readers should be updated.
+    ///
+    /// Note that it is possible but not recommended to change the value and not notify the
+    /// readers. This has the consequence that the call to [`Source::get()`] will not see the
+    /// update and still return [`None`]. The update will be reflected in
+    /// [`Source::get_existing()`] of the immediate [readers](ReadSignal), but it won't be
+    /// propagated in the graph. The main motivation of using this method is if `T` doesn't
+    /// implement [`PartialEq`], otherwise you should really use [`Self::set_if_changed()`] or
+    /// [`Self::update_if_changed()`] instead.
+    #[inline]
+    pub fn update_with<U>(&self, f: impl FnOnce(&mut T) -> (bool, U)) -> U {
         let mut self_ = self.0.write();
+        let (changed, res) = f(&mut self_.value);
 
-        // Increment the generation.
-        // Pssst: the syntax for updating `NonZero` types needs some refinement :)
-        self_.val_generation = self_
-            .val_generation
-            .checked_add(1)
-            .expect("WriteSignal generation overflow");
+        if changed {
+            // Increment the generation.
+            // Pssst: the syntax for updating `NonZero` types needs some refinement :)
+            self_.val_generation = self_
+                .val_generation
+                .checked_add(1)
+                .expect("WriteSignal generation overflow");
+        }
 
-        mem::replace(&mut self_.value, value)
+        res
+    }
+}
+
+impl<T> Clone for WriteSignal<T> {
+    fn clone(&self) -> Self {
+        WriteSignal(self.0.clone())
+    }
+}
+
+impl<T> Clone for ReadSignal<T> {
+    fn clone(&self) -> Self {
+        Self {
+            source: self.source.clone(),
+            val_generation: self.val_generation.clone(),
+        }
     }
 }
 
@@ -259,7 +340,7 @@ struct Node<T> {
     /// The [`ReactiveGraph`] for this node.
     graph: ReactiveGraph,
 
-    /// The [`ReactiveGraph::generation`] when this was last evaluated, or 0 if it never has been
+    /// The [`ReactiveGraphInner::generation`] when this was last evaluated, or 0 if it never has been
     /// generated.
     graph_generation: u64,
 
