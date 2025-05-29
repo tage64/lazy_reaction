@@ -229,7 +229,7 @@ impl<T> WriteSignal<T> {
     ///
     /// Note that this returns a read-lock of the value, so you shouldn't update the value
     /// simultaneously.
-    pub fn value(&self) -> impl Deref<Target = T> {
+    pub fn value<'a>(&'a self) -> impl Deref<Target = T> + use<'a, T> {
         RwLockReadGuard::map(self.0.read(), |x| &x.value)
     }
 

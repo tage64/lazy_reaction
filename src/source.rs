@@ -4,6 +4,8 @@
 //! - Arrays: `impl<S, const N> Source for [S; N]`
 //! - and slices: `impl<S> Source for [S]`
 //! All the above assume `S: Source`.
+use std::marker::PhantomData;
+
 use seq_macro::seq;
 
 pub trait Source<T> {
@@ -12,6 +14,17 @@ pub trait Source<T> {
     fn get_existing(&self) -> T;
 
     fn reset(&mut self);
+
+    fn map<U>(self, map_fn: impl Fn(T) -> U) -> impl Source<U>
+    where
+        Self: Sized,
+    {
+        MappedSource {
+            source: self,
+            map_fn,
+            _tys: PhantomData,
+        }
+    }
 }
 
 impl<S1, S2, T1, T2> Source<(T1, T2)> for (S1, S2)
@@ -155,5 +168,29 @@ where
         for source in self.iter_mut() {
             source.reset();
         }
+    }
+}
+
+pub struct MappedSource<S, T, U, F> {
+    source: S,
+    map_fn: F,
+    _tys: PhantomData<(T, U)>,
+}
+
+impl<S, F, T, U> Source<U> for MappedSource<S, T, U, F>
+where
+    S: Source<T>,
+    F: Fn(T) -> U,
+{
+    fn get(&mut self) -> Option<U> {
+        self.source.get().map(&self.map_fn)
+    }
+
+    fn get_existing(&self) -> U {
+        (self.map_fn)(self.source.get_existing())
+    }
+
+    fn reset(&mut self) {
+        self.source.reset()
     }
 }
