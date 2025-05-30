@@ -234,17 +234,17 @@ impl<T> WriteSignal<T> {
     }
 
     /// Update the value of the signal if the new value is not equal to the existing. Returns the
-    /// old value if updated, otherwise returns `Err(value)`.
-    pub fn set_if_changed(&self, value: T) -> Result<T, T>
+    /// old value if updated, otherwise returns `None`.
+    pub fn set_if_changed(&self, value: T) -> Option<T>
     where
         T: PartialEq,
     {
         self.update_with(|x| {
             if value == *x {
-                (false, Err(value))
+                (false, None)
             } else {
                 let old_value = mem::replace(x, value);
-                (true, Ok(old_value))
+                (true, Some(old_value))
             }
         })
     }
@@ -252,12 +252,12 @@ impl<T> WriteSignal<T> {
     /// Get a mutable reference to the value and possibly update it. The change will be propagated
     /// if the old value is not equal to the new.
     ///
-    /// Returns [`Ok`] with the old value if it did change or [`Err`] if it was unchanged.
+    /// Returns [`Some`] with the old value if it did change or [`None`] if it was unchanged.
     ///
     /// Note that this requires an extra clone of the inner value. You may also use
     /// [`Self::set_if_changed()`], [`Self::update_with()`] or [`Self::update()`] if this is
     /// undesirable.
-    pub fn update_if_changed<U>(&self, f: impl FnOnce(&mut T) -> U) -> Result<(T, U), U>
+    pub fn update_if_changed<U>(&self, f: impl FnOnce(&mut T) -> U) -> (U, Option<T>)
     where
         T: PartialEq + Clone,
     {
@@ -265,9 +265,9 @@ impl<T> WriteSignal<T> {
             let old_value = x.clone();
             let ret = f(x);
             if *x == old_value {
-                (false, Err(ret)) // Not updated.
+                (false, (ret, None)) // Not updated.
             } else {
-                (true, Ok((old_value, ret)))
+                (true, (ret, Some(old_value)))
             }
         })
     }
