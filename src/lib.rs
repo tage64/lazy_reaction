@@ -368,7 +368,7 @@ struct Node<T> {
 
     /// The function to compute a new value. Takes a reference to the `last_value` and returns
     /// `None` if the value is unchanged.
-    func: Box<dyn FnMut(&T) -> Option<T>>,
+    func: Box<dyn FnMut(&T) -> Option<T> + Send + Sync>,
 
     /// The generation of this value.
     val_generation: NonZero<u64>,
@@ -397,7 +397,7 @@ impl<T: Clone> DerivedSignal<T> {
         mut has_changed: impl FnMut(&T, &T) -> bool + Send + Sync + 'static,
     ) -> Self
     where
-        S: Source<U> + 'static,
+        S: Source<U> + Send + Sync + 'static,
     {
         source.reset();
 
@@ -438,7 +438,7 @@ impl ReactiveGraph {
         mut f: impl FnMut(U) -> T + Send + Sync + 'static,
     ) -> DerivedSignal<T>
     where
-        S: Source<U> + 'static,
+        S: Source<U> + Send + Sync + 'static,
         T: Clone,
     {
         self.derived_signal_with_old_val(source, move |_old_val, x| f(x))
@@ -452,7 +452,7 @@ impl ReactiveGraph {
         f: impl FnMut(Option<&T>, U) -> T + Send + Sync + 'static,
     ) -> DerivedSignal<T>
     where
-        S: Source<U> + 'static,
+        S: Source<U> + Send + Sync + 'static,
         T: Clone,
     {
         DerivedSignal::new(self.clone(), source, f, |_, _| true)
@@ -466,7 +466,7 @@ impl ReactiveGraph {
         mut f: impl FnMut(U) -> T + Send + Sync + 'static,
     ) -> DerivedSignal<T>
     where
-        S: Source<U> + 'static,
+        S: Source<U> + Send + Sync + 'static,
         T: Clone + PartialEq,
     {
         self.memo_with_comparator(source, move |_old_val, x| f(x), |lhs, rhs| lhs != rhs)
@@ -480,7 +480,7 @@ impl ReactiveGraph {
         mut f: impl FnMut(Option<&T>, U) -> T + Send + Sync + 'static,
     ) -> DerivedSignal<T>
     where
-        S: Source<U> + 'static,
+        S: Source<U> + Send + Sync + 'static,
         T: Clone + PartialEq,
     {
         self.memo_with_comparator(
@@ -499,7 +499,7 @@ impl ReactiveGraph {
         has_changed: impl FnMut(&T, &T) -> bool + Send + Sync + 'static,
     ) -> DerivedSignal<T>
     where
-        S: Source<U> + 'static,
+        S: Source<U> + Send + Sync + 'static,
         T: Clone,
     {
         DerivedSignal::new(self.clone(), source, f, has_changed)
